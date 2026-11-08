@@ -464,18 +464,25 @@ const STORE = 'piano-cascade-midi';
 let imported = [];
 try { imported = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e){ imported = []; }
 const saveImported = () => { try { localStorage.setItem(STORE, JSON.stringify(imported)); return true; } catch(e){ return false; } };
-function allSongs(){ return [...SONGS, ...imported.map(s => ({...s, imported:true}))]; }
+let repoSongs = [];   // fichiers .mid du dossier docs/midi du dépôt GitHub
+function allSongs(){ return [...SONGS, ...repoSongs, ...imported.map(s => ({...s, imported:true}))]; }
+const firstImported = () => SONGS.length + repoSongs.length;
 function fillSongs(selected){
   sel.innerHTML = '';
   SONGS.forEach((s,i) => sel.add(new Option(s.title, i)));
+  if (repoSongs.length){
+    const g = document.createElement('optgroup'); g.label = 'Mon dépôt GitHub';
+    repoSongs.forEach((s,i) => g.appendChild(new Option(s.title, SONGS.length+i)));
+    sel.appendChild(g);
+  }
   if (imported.length){
-    const g = document.createElement('optgroup'); g.label = 'Mes fichiers MIDI';
-    imported.forEach((s,i) => g.appendChild(new Option(s.title, SONGS.length+i)));
+    const g = document.createElement('optgroup'); g.label = 'Importés sur ce téléphone';
+    imported.forEach((s,i) => g.appendChild(new Option(s.title, firstImported()+i)));
     sel.appendChild(g);
   }
   sel.value = String(selected);
 }
-sel.addEventListener('change', () => loadSong(+sel.value));
+sel.addEventListener('change', () => openSong(+sel.value));
 function say(text){ const m = document.getElementById('msg'); m.textContent = text; m.hidden = !text; clearTimeout(say.t); if (text) say.t = setTimeout(() => m.hidden = true, 6000); }
 
 // Lecture d'un fichier MIDI standard (formats 0 et 1)
@@ -534,16 +541,16 @@ document.getElementById('midi').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = ''; if (!f) return;
   try {
     const song = parseMidi(await f.arrayBuffer());
-    song.title = f.name.replace(/\.(mid|midi)$/i, '').replace(/[_-]+/g, ' ').trim() || 'Morceau importé';
+    song.title = titleOf(f.name) || 'Morceau importé';
     imported.push(song);
     const ok = saveImported();
-    fillSongs(SONGS.length + imported.length - 1);
-    loadSong(SONGS.length + imported.length - 1);
+    fillSongs(firstImported() + imported.length - 1);
+    loadSong(firstImported() + imported.length - 1);
     say(`« ${song.title} » ajouté : ${song.notes.length} notes.` + (ok ? '' : " Il ne sera pas gardé après fermeture (stockage indisponible)."));
   } catch(err){ say('Import impossible : ' + err.message); }
 });
 document.getElementById('del').addEventListener('click', () => {
-  const i = +sel.value - SONGS.length; if (i < 0) return;
+  const i = +sel.value - firstImported(); if (i < 0) return;
   const [gone] = imported.splice(i, 1); saveImported();
   fillSongs(0); loadSong(0); say(`« ${gone.title} » supprimé.`);
 });
@@ -553,6 +560,47 @@ document.querySelectorAll('#hand button').forEach(b => b.addEventListener('click
   restart();
 }));
 fillSongs(0);
+
+// ---------- Morceaux rangés dans le dépôt GitHub (dossier docs/midi) ----------
+const titleOf = name => name.replace(/\.(mid|midi)$/i, '').replace(/[_-]+/g, ' ').trim();
+function repoInfo(){
+  const h = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  const seg = location.pathname.split('/').filter(Boolean)[0];
+  return h ? {owner:h[1], repo: seg || `${h[1]}.github.io`} : {owner:'nightf69', repo:'piano-cascade'};
+}
+async function listRepoMidi(){
+  const {owner, repo} = repoInfo();
+  try {
+    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/docs/midi`, {headers:{Accept:'application/vnd.github+json'}});
+    if (r.ok){
+      const files = await r.json();
+      return files.filter(f => f.type === 'file' && /\.(mid|midi)$/i.test(f.name)).map(f => f.name);
+    }
+  } catch(e){}
+  try { const r = await fetch('midi/index.json'); if (r.ok) return (await r.json()).filter(n => /\.(mid|midi)$/i.test(n)); } catch(e){}
+  return [];
+}
+async function openSong(i){
+  const s = allSongs()[i];
+  if (s.path && !s.notes){
+    say(`Chargement de « ${s.title} »…`);
+    try {
+      const r = await fetch(s.path);
+      if (!r.ok) throw new Error(`fichier introuvable (${r.status})`);
+      Object.assign(s, parseMidi(await r.arrayBuffer()));
+      say('');
+    } catch(err){ say(`Impossible de lire « ${s.title} » : ${err.message}`); sel.value = String(SONGS.indexOf(song) >= 0 ? SONGS.indexOf(song) : 0); return; }
+  }
+  if (+sel.value === i) loadSong(i);
+}
+listRepoMidi().then(names => {
+  if (!names.length) return;
+  const current = +sel.value, wasImported = current >= firstImported();
+  const cur = wasImported ? current - firstImported() : -1;
+  repoSongs = names.sort((a,b) => a.localeCompare(b, 'fr')).map(n => ({title:titleOf(n), path:'midi/' + encodeURIComponent(n), bpm:120, bar:4}));
+  fillSongs(wasImported ? firstImported() + cur : current);
+  if (wasImported) loadSong(+sel.value);
+});
 function togglePlay(){
   Synth.init();
   if (finished) restart();
