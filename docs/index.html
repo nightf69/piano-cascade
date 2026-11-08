@@ -42,9 +42,22 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 .speed input{width:90px;accent-color:var(--gold)}
 .speed output{font:500 12px var(--mono);color:var(--fg);min-width:38px}
 #names[aria-pressed="false"]{color:var(--muted)}
+.filebtn{font:600 14px/36px var(--display);height:36px;padding:0 12px;border:1px dashed var(--gold);color:var(--gold);border-radius:9px;cursor:pointer;white-space:nowrap}
+.filebtn input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.filebtn:focus-within{outline:2px solid var(--gold);outline-offset:2px}
+.msg{flex-basis:100%;font-size:13px;color:var(--fg);background:#3a2a22;border-radius:8px;padding:8px 10px}
 .score{margin-left:auto;font:500 13px var(--mono);color:var(--muted);white-space:nowrap}
 .score b{color:var(--fg);font-weight:700}
 .stage{flex:1;min-height:0;position:relative;padding-left:env(safe-area-inset-left, 0px);padding-right:env(safe-area-inset-right, 0px)}
+@media (max-height:520px){
+  .bar{flex-wrap:nowrap;overflow-x:auto;padding-block:6px;scrollbar-width:none}
+  .bar::-webkit-scrollbar{display:none}
+  .bar .row{flex-wrap:nowrap}
+  .bar > *{flex-shrink:0}
+  .brand{display:none}
+  .score{margin-left:0;order:9}
+  .msg{position:fixed;z-index:5;top:calc(env(safe-area-inset-top,0px) + 56px);left:max(12px, env(safe-area-inset-left,0px));right:max(12px, env(safe-area-inset-right,0px))}
+}
 canvas{display:block;width:100%;height:100%;touch-action:none}
 </style>
 </head>
@@ -64,7 +77,15 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
     <button id="restart" aria-label="Recommencer">↺</button>
     <label class="speed" for="speed">Vitesse <input type="range" id="speed" min="40" max="150" step="10" value="100"><output id="speedv">100%</output></label>
     <button id="names" aria-pressed="true">Do Ré Mi</button>
+    <div class="seg" id="hand" role="radiogroup" aria-label="Main">
+      <button id="h-both" role="radio" data-hand="both" aria-checked="true">2 mains</button>
+      <button id="h-R" role="radio" data-hand="R" aria-checked="false">Droite</button>
+      <button id="h-L" role="radio" data-hand="L" aria-checked="false">Gauche</button>
+    </div>
+    <label class="filebtn" for="midi">＋ Importer MIDI<input type="file" id="midi" accept=".mid,.midi,audio/midi,audio/x-midi"></label>
+    <button id="del" hidden>Supprimer</button>
   </div>
+  <div id="msg" class="msg" hidden></div>
 </header>
 <div class="stage" id="stage"><canvas id="cv"></canvas></div>
 
@@ -154,7 +175,9 @@ const LEAD = 2.2, LOOK = 3.0;   // secondes avant la 1re note ; secondes visible
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let song, notes, low, high, endT, secPerBeat;
 let t = -LEAD, playing = false, finished = false, waiting = false, last = null;
-let mode = 'learn', speed = 1, frNames = true;
+let mode = 'learn', speed = 1, frNames = true, handSel = 'both';
+const mine = n => handSel === 'both' || n.hand === handSel;
+const GROUP = 0.04;  // notes jouées « ensemble » (accords)
 let hits = 0, wrong = 0;
 const userDown = new Map();      // pointerId/clé -> midi
 const pressedCount = new Map();  // midi -> nb d'appuis actifs
@@ -162,15 +185,20 @@ const flashes = [];
 let W=0, H=0, dpr=1, kh=0, hitY=0, geo = new Map(), whites = [];
 
 function loadSong(i){
-  song = SONGS[i];
+  song = allSongs()[i];
   secPerBeat = 60/song.bpm;
-  notes = [...seq(song.rh,'R'), ...(song.lh ? seq(song.lh,'L') : [])]
-    .map(n => ({...n, s:n.b*secPerBeat, dur:n.d*secPerBeat, hit:false, missed:false, auto:false}))
-    .sort((a,b) => a.s-b.s || a.m-b.m);
-  const ms = notes.map(n => n.m);
-  low = 12*Math.floor(Math.min(...ms)/12);
-  high = 12*Math.floor(Math.max(...ms)/12)+11;
+  const raw = song.notes
+    ? song.notes.map(([m,s,dur,hand]) => ({m, s, dur, hand}))
+    : [...seq(song.rh,'R'), ...(song.lh ? seq(song.lh,'L') : [])].map(n => ({m:n.m, hand:n.hand, s:n.b*secPerBeat, dur:n.d*secPerBeat}));
+  notes = raw.map(n => ({...n, hit:false, missed:false, auto:false})).sort((a,b) => a.s-b.s || a.m-b.m);
+  const ms = notes.map(n => n.m).sort((a,b) => a-b);
+  const pct = q => ms[Math.min(ms.length-1, Math.floor(q*ms.length))];
+  low = 12*Math.floor(pct(0.03)/12);
+  high = 12*Math.floor(pct(0.97)/12)+11;
   if (high-low < 23) high = low+23;
+  if (high-low > 47) high = low+47;          // 4 octaves max pour rester jouable sur téléphone
+  for (const n of notes){ while (n.m < low) n.m += 12; while (n.m > high) n.m -= 12; }
+  document.getElementById('del').hidden = !song.imported;
   endT = Math.max(...notes.map(n => n.s+n.dur));
   restart();
   layout();
@@ -191,7 +219,7 @@ function setPlaying(p){
 function updateScore(){
   const el = document.getElementById('score');
   if (mode === 'listen'){ el.innerHTML = `${song.bpm} bpm · <b>${notes.length}</b> notes`; return; }
-  el.innerHTML = `Justes <b>${hits}</b>/${notes.length}` + (mode === 'play' ? ` · Fausses <b>${wrong}</b>` : '');
+  el.innerHTML = `Justes <b>${hits}</b>/${notes.filter(mine).length}` + (mode === 'play' ? ` · Fausses <b>${wrong}</b>` : '');
 }
 const noteName = m => (frNames ? FR : EN)[m%12];
 const octave = m => Math.floor(m/12)-1;
@@ -221,14 +249,14 @@ function step(dt){
   let nt = t + dt*speed;
   waiting = false;
   if (mode === 'learn'){
-    const next = notes.find(n => !n.hit);
+    const next = notes.find(n => !n.hit && mine(n));
     if (next && nt >= next.s){ nt = next.s; waiting = true; }
   }
   t = nt;
   for (const n of notes){
     if (n.s > t) break;
-    if (mode === 'listen' && !n.auto){ n.auto = true; n.hit = true; Synth.playFor(n.m, n.dur/speed*0.95); spark(n); }
-    if (mode === 'play' && !n.hit && !n.missed && t > n.s + 0.3){ n.missed = true; updateScore(); }
+    if ((mode === 'listen' || !mine(n)) && !n.auto){ n.auto = true; n.hit = true; Synth.playFor(n.m, n.dur/speed*0.95); spark(n); }
+    if (mode === 'play' && mine(n) && !n.hit && !n.missed && t > n.s + 0.3){ n.missed = true; updateScore(); }
   }
   if (t > endT + 1.2){ finished = true; setPlaying(false); }
 }
@@ -237,8 +265,8 @@ function press(m){
   pressedCount.set(m, (pressedCount.get(m)||0)+1);
   if (mode === 'listen' || finished) return;
   const tol = mode === 'learn' ? 0.25 : 0.3;
-  const n = notes.find(n => n.m === m && !n.hit && !n.missed && Math.abs(n.s - t) <= tol);
-  if (n){ n.hit = true; hits++; spark(n); if (!playing && mode === 'learn' && t >= 0) setPlaying(true); }
+  const n = notes.find(n => n.m === m && mine(n) && !n.hit && !n.missed && Math.abs(n.s - t) <= tol);
+  if (n){ n.hit = true; hits++; if (mode === 'learn' && waiting) t = Math.max(t, n.s); spark(n); if (!playing && mode === 'learn' && t >= 0) setPlaying(true); }
   else if (playing && mode === 'play') wrong++;
   updateScore();
 }
@@ -299,10 +327,10 @@ function draw(now){
     ctx.fillRect(Math.round(g.x), 0, 1, hitY);
   }
   // barres de mesure
-  const barSec = song.bar*secPerBeat;
-  for (let k = Math.ceil(t/barSec); k*barSec < t+LOOK+1; k++){
-    if (k*barSec > endT) break;
-    const y = hitY - (k*barSec - t)*pps;
+  const barSec = song.bar*secPerBeat, off = song.offset || 0;
+  for (let k = Math.ceil((t+off)/barSec); k*barSec - off < t+LOOK+1; k++){
+    if (k*barSec - off > endT) break;
+    const y = hitY - (k*barSec - off - t)*pps;
     ctx.fillStyle = 'rgba(244,235,222,.07)'; ctx.fillRect(0, Math.round(y), W, 1);
     ctx.fillStyle = 'rgba(244,235,222,.28)'; ctx.font = '500 10px "JetBrains Mono", monospace';
     ctx.fillText(String(k+1), 4, y-3);
@@ -345,7 +373,7 @@ function draw(now){
     if (n.s > t + 0.001) break;
     if (t < n.s + n.dur && !n.missed) guide.set(n.m, n.hand);
   }
-  if (waiting) for (const n of notes) if (!n.hit && Math.abs(n.s - t) < 0.001) guide.set(n.m, n.hand);
+  if (waiting) for (const n of notes) if (!n.hit && mine(n) && n.s - t < GROUP) guide.set(n.m, n.hand);
 
   const ky = hitY + 7, bh = kh*0.62;
   for (const m of whites){
@@ -387,7 +415,7 @@ function draw(now){
   else if (!playing && t <= -LEAD + 0.01) banner(song.title, startHint());
   else if (!playing) banner('Pause', 'Touchez ▶ pour reprendre');
   else if (waiting){
-    const want = notes.filter(n => !n.hit && Math.abs(n.s - t) < 0.001).map(n => noteName(n.m)+octave(n.m)).join(' + ');
+    const want = notes.filter(n => !n.hit && mine(n) && n.s >= t - 0.001 && n.s - t < GROUP).map(n => noteName(n.m)+octave(n.m)).join(' + ');
     pill('À vous : ' + want);
   }
 }
@@ -398,7 +426,7 @@ function startHint(){
 }
 function resultText(){
   if (mode === 'listen') return 'Fin du morceau';
-  const pct = Math.round(100*hits/notes.length);
+  const pct = Math.round(100*hits/Math.max(1, notes.filter(mine).length));
   return mode === 'play' ? `${pct} % de notes justes` : 'Morceau terminé, bravo !';
 }
 function banner(title, sub){
@@ -432,8 +460,99 @@ function frame(now){
 
 // ---------- Contrôles ----------
 const sel = document.getElementById('song');
-SONGS.forEach((s,i) => sel.add(new Option(s.title, i)));
+const STORE = 'piano-cascade-midi';
+let imported = [];
+try { imported = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e){ imported = []; }
+const saveImported = () => { try { localStorage.setItem(STORE, JSON.stringify(imported)); return true; } catch(e){ return false; } };
+function allSongs(){ return [...SONGS, ...imported.map(s => ({...s, imported:true}))]; }
+function fillSongs(selected){
+  sel.innerHTML = '';
+  SONGS.forEach((s,i) => sel.add(new Option(s.title, i)));
+  if (imported.length){
+    const g = document.createElement('optgroup'); g.label = 'Mes fichiers MIDI';
+    imported.forEach((s,i) => g.appendChild(new Option(s.title, SONGS.length+i)));
+    sel.appendChild(g);
+  }
+  sel.value = String(selected);
+}
 sel.addEventListener('change', () => loadSong(+sel.value));
+function say(text){ const m = document.getElementById('msg'); m.textContent = text; m.hidden = !text; clearTimeout(say.t); if (text) say.t = setTimeout(() => m.hidden = true, 6000); }
+
+// Lecture d'un fichier MIDI standard (formats 0 et 1)
+function parseMidi(buf){
+  const d = new DataView(buf); let p = 0;
+  const u8 = () => d.getUint8(p++), u16 = () => { const v = d.getUint16(p); p += 2; return v; }, u32 = () => { const v = d.getUint32(p); p += 4; return v; };
+  const str = n => { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(d.getUint8(p+i)); p += n; return s; };
+  const vlq = () => { let v = 0, b; do { b = u8(); v = v*128 + (b & 0x7f); } while (b & 0x80); return v; };
+  if (str(4) !== 'MThd') throw new Error("Ce fichier n'est pas un fichier MIDI.");
+  const hl = u32(); u16(); const ntr = u16(), div = u16(); p += hl-6;
+  if (div & 0x8000) throw new Error('Ce MIDI utilise un format de temps non pris en charge (SMPTE).');
+  const tempos = [{tick:0, us:500000}]; let num = 4; const tracks = [];
+  for (let k = 0; k < ntr && p + 8 <= d.byteLength; k++){
+    const id = str(4), len = u32(), end = Math.min(p+len, d.byteLength);
+    if (id !== 'MTrk'){ p = end; continue; }
+    let tick = 0, run = 0; const open = new Map(), tn = [];
+    while (p < end){
+      tick += vlq();
+      let st = d.getUint8(p);
+      if (st & 0x80){ p++; if (st < 0xF0) run = st; } else st = run;
+      if (st === 0xFF){
+        const type = u8(), l = vlq();
+        if (type === 0x51) tempos.push({tick, us:(d.getUint8(p)<<16) | (d.getUint8(p+1)<<8) | d.getUint8(p+2)});
+        if (type === 0x58 && tick === 0) num = d.getUint8(p);
+        p += l;
+      } else if (st === 0xF0 || st === 0xF7){ p += vlq(); }
+      else {
+        const type = st & 0xF0, ch = st & 0x0F, a = u8(), b = (type === 0xC0 || type === 0xD0) ? 0 : u8();
+        if (ch === 9) continue;                       // canal 10 = batterie
+        const key = ch*128 + a;
+        if (type === 0x90 && b > 0){ if (!open.has(key)) open.set(key, []); open.get(key).push(tick); }
+        else if (type === 0x80 || (type === 0x90 && b === 0)){ const q = open.get(key); if (q && q.length) tn.push({m:a, t0:q.shift(), t1:tick}); }
+      }
+    }
+    p = end; if (tn.length) tracks.push(tn);
+  }
+  if (!tracks.length) throw new Error('Aucune note trouvée dans ce fichier.');
+  tempos.sort((a,b) => a.tick-b.tick);
+  const sec = tick => { let s = 0, prev = 0, us = 500000;
+    for (const tp of tempos){ if (tp.tick >= tick) break; s += (tp.tick-prev)*us/div/1e6; prev = tp.tick; us = tp.us; }
+    return s + (tick-prev)*us/div/1e6; };
+  const avg = tn => tn.reduce((a,n) => a+n.m, 0)/tn.length;
+  const top = tracks.length > 1 ? tracks.indexOf(tracks.reduce((a,b) => avg(b) > avg(a) ? b : a)) : -1;
+  let out = [];
+  tracks.forEach((tn,i) => tn.forEach(n => {
+    const hand = top < 0 ? (n.m >= 60 ? 'R' : 'L') : (i === top ? 'R' : 'L');
+    const s0 = sec(n.t0); out.push([n.m, s0, Math.max(0.08, sec(n.t1)-s0), hand]);
+  }));
+  const first = Math.min(...out.map(n => n[1]));
+  out = out.map(([m,s,dur,h]) => [m, +(s-first).toFixed(3), +dur.toFixed(3), h]);
+  const us0 = tempos.filter(t => t.tick === 0).pop().us;
+  const bpm = Math.round(60e6/us0);
+  return {notes:out, bpm, bar:num || 4, offset:+((first % (num*60/bpm))).toFixed(3)};
+}
+document.getElementById('midi').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const song = parseMidi(await f.arrayBuffer());
+    song.title = f.name.replace(/\.(mid|midi)$/i, '').replace(/[_-]+/g, ' ').trim() || 'Morceau importé';
+    imported.push(song);
+    const ok = saveImported();
+    fillSongs(SONGS.length + imported.length - 1);
+    loadSong(SONGS.length + imported.length - 1);
+    say(`« ${song.title} » ajouté : ${song.notes.length} notes.` + (ok ? '' : " Il ne sera pas gardé après fermeture (stockage indisponible)."));
+  } catch(err){ say('Import impossible : ' + err.message); }
+});
+document.getElementById('del').addEventListener('click', () => {
+  const i = +sel.value - SONGS.length; if (i < 0) return;
+  const [gone] = imported.splice(i, 1); saveImported();
+  fillSongs(0); loadSong(0); say(`« ${gone.title} » supprimé.`);
+});
+document.querySelectorAll('#hand button').forEach(b => b.addEventListener('click', () => {
+  handSel = b.dataset.hand;
+  document.querySelectorAll('#hand button').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+  restart();
+}));
+fillSongs(0);
 function togglePlay(){
   Synth.init();
   if (finished) restart();
